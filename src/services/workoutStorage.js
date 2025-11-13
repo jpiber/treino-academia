@@ -23,19 +23,46 @@ export const saveSession = async (session) => {
 };
 
 export const listSessions = async (userId) => {
-  const constraints = [
-    orderBy('completedAt', 'desc'),
-  ];
+  try {
+    const constraints = [];
 
-  if (userId) {
-    constraints.push(where('userId', '==', userId));
+    if (userId) {
+      constraints.push(where('userId', '==', userId));
+    }
+
+    // Se tiver userId, tenta com orderBy. Se falhar, busca sem orderBy e ordena em memória
+    let snapshot;
+    try {
+      if (constraints.length > 0) {
+        constraints.push(orderBy('completedAt', 'desc'));
+        snapshot = await getDocs(query(sessionsCollection, ...constraints));
+      } else {
+        snapshot = await getDocs(sessionsCollection);
+      }
+    } catch (indexError) {
+      // Se falhar por falta de índice, busca sem orderBy e ordena depois
+      if (constraints.length > 0) {
+        snapshot = await getDocs(query(sessionsCollection, ...constraints.slice(0, -1)));
+      } else {
+        snapshot = await getDocs(sessionsCollection);
+      }
+    }
+
+    const sessions = snapshot.docs.map((docSnap) => ({
+      id: docSnap.id,
+      ...docSnap.data(),
+    }));
+
+    // Ordenar por data se não foi possível usar orderBy no Firestore
+    return sessions.sort((a, b) => {
+      const dateA = new Date(a.completedAt || 0);
+      const dateB = new Date(b.completedAt || 0);
+      return dateB - dateA; // Descendente
+    });
+  } catch (error) {
+    console.warn('Erro ao listar sessões:', error);
+    return [];
   }
-
-  const snapshot = await getDocs(query(sessionsCollection, ...constraints));
-  return snapshot.docs.map((docSnap) => ({
-    id: docSnap.id,
-    ...docSnap.data(),
-  }));
 };
 
 export const getAllExerciseConfigs = async (userId) => {

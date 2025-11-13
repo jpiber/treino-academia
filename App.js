@@ -253,11 +253,9 @@ export default function App() {
       setHistory(sessions);
     } catch (error) {
       console.warn('Erro ao carregar histórico de treinos do Firebase', error);
-      Alert.alert(
-        'Erro',
-        'Não foi possível carregar o histórico de treinos. Verifique sua conexão.',
-        [{ text: 'OK' }],
-      );
+      // Não mostrar alerta - histórico não é crítico, apenas logar o erro
+      // O app continua funcionando normalmente mesmo sem histórico
+      setHistory([]);
     } finally {
       setLoadingHistory(false);
     }
