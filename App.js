@@ -1,5 +1,5 @@
 import { StatusBar } from 'expo-status-bar';
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -12,6 +12,7 @@ import {
   Image,
   ActivityIndicator,
   Alert,
+  AppState,
 } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import {
@@ -187,8 +188,12 @@ const applyPreviousSession = (exercises, lastSession) => {
 };
 
 const formatSeconds = (value) => {
-  const minutes = Math.floor(value / 60);
+  const hours = Math.floor(value / 3600);
+  const minutes = Math.floor((value % 3600) / 60);
   const seconds = value % 60;
+  if (hours > 0) {
+    return `${hours}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+  }
   return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
 };
 
@@ -205,46 +210,104 @@ export default function App() {
   const [activeTab, setActiveTab] = useState('workouts');
   const [loadingHistory, setLoadingHistory] = useState(true);
   const [loadingWorkout, setLoadingWorkout] = useState(false);
+  const [expandedExercises, setExpandedExercises] = useState(new Set());
+  const trainingStartTimeRef = useRef(null);
+  const restStartTimeRef = useRef(null);
+  const appStateRef = useRef(AppState.currentState);
 
   useEffect(() => {
     if (!restTimer) {
+      restStartTimeRef.current = null;
       return;
     }
 
-    if (restTimer.remaining <= 0) {
-      setRestTimer(null);
-      return;
+    // Só atualiza o start time se for um novo timer (nova key)
+    if (!restStartTimeRef.current || restTimer.key !== restStartTimeRef.current.key) {
+      restStartTimeRef.current = {
+        timestamp: Date.now(),
+        key: restTimer.key,
+        initialRemaining: restTimer.remaining,
+      };
     }
 
     const tick = setInterval(() => {
-      setRestTimer((current) => {
-        if (!current) {
-          return null;
+      if (restStartTimeRef.current) {
+        const elapsed = Math.floor(
+          (Date.now() - restStartTimeRef.current.timestamp) / 1000
+        );
+        const remaining = Math.max(
+          0,
+          restStartTimeRef.current.initialRemaining - elapsed
+        );
+
+        if (remaining <= 0) {
+          setRestTimer(null);
+          restStartTimeRef.current = null;
+          return;
         }
-        if (current.remaining <= 1) {
-          return null;
-        }
-        return { ...current, remaining: current.remaining - 1 };
-      });
-    }, 1000);
+
+        setRestTimer((current) => {
+          if (!current) return null;
+          return { ...current, remaining };
+        });
+      }
+    }, 100);
 
     return () => clearInterval(tick);
-  }, [restTimer]);
+  }, [restTimer?.key]);
 
   useEffect(() => {
     if (!trainingTimer.running) {
+      trainingStartTimeRef.current = null;
       return;
     }
 
+    trainingStartTimeRef.current = Date.now() - trainingTimer.elapsed * 1000;
+
+    const handleAppStateChange = (nextAppState) => {
+      if (appStateRef.current.match(/inactive|background/) && nextAppState === 'active') {
+        if (trainingStartTimeRef.current) {
+          const elapsed = Math.floor((Date.now() - trainingStartTimeRef.current) / 1000);
+          setTrainingTimer((current) => ({
+            ...current,
+            elapsed,
+          }));
+        }
+        if (restStartTimeRef.current && restTimer) {
+          const elapsed = Math.floor(
+            (Date.now() - restStartTimeRef.current.timestamp) / 1000
+          );
+          const remaining = Math.max(
+            0,
+            restStartTimeRef.current.initialRemaining - elapsed
+          );
+          if (remaining > 0) {
+            setRestTimer((current) => (current ? { ...current, remaining } : null));
+          } else {
+            setRestTimer(null);
+          }
+        }
+      }
+      appStateRef.current = nextAppState;
+    };
+
+    const subscription = AppState.addEventListener('change', handleAppStateChange);
+
     const tick = setInterval(() => {
-      setTrainingTimer((current) => ({
-        ...current,
-        elapsed: current.elapsed + 1,
-      }));
+      if (trainingStartTimeRef.current) {
+        const elapsed = Math.floor((Date.now() - trainingStartTimeRef.current) / 1000);
+        setTrainingTimer((current) => ({
+          ...current,
+          elapsed,
+        }));
+      }
     }, 1000);
 
-    return () => clearInterval(tick);
-  }, [trainingTimer.running]);
+    return () => {
+      clearInterval(tick);
+      subscription?.remove();
+    };
+  }, [trainingTimer.running, restTimer]);
 
   const refreshHistory = useCallback(async () => {
     setLoadingHistory(true);
@@ -387,6 +450,8 @@ export default function App() {
     setIsTraining(true);
     setRestTimer(null);
     setTrainingTimer({ running: true, elapsed: 0 });
+    // Expandir todos os exercícios ao iniciar
+    setExpandedExercises(new Set(sessionExercises.map((e) => e.id)));
   };
 
   const handleToggleSet = (exerciseId, exerciseName, setIndex) => {
@@ -394,11 +459,11 @@ export default function App() {
       return;
     }
 
-    let toggledCompleted = false;
     const timerKey = `${exerciseId}-${setIndex}`;
 
-    setSessionExercises((previous) =>
-      previous.map((exercise) => {
+    setSessionExercises((previous) => {
+      let wasJustCompleted = false;
+      const updated = previous.map((exercise) => {
         if (exercise.id !== exerciseId) {
           return exercise;
         }
@@ -407,23 +472,44 @@ export default function App() {
           if (index !== setIndex) {
             return set;
           }
-          toggledCompleted = !set.completed;
-          return { ...set, completed: toggledCompleted };
+          // Não permite desmarcar - só marca se ainda não estiver marcado
+          if (set.completed) {
+            return set;
+          }
+          wasJustCompleted = true;
+          return { ...set, completed: true };
         });
 
         return { ...exercise, sets: updatedSets };
-      }),
-    );
-
-    if (toggledCompleted) {
-      setRestTimer({
-        key: timerKey,
-        exerciseName,
-        remaining: REST_TIME_SECONDS,
       });
-    } else if (restTimer?.key === timerKey) {
-      setRestTimer(null);
-    }
+
+      // Se a série foi marcada agora, inicia o timer de descanso
+      if (wasJustCompleted) {
+        setRestTimer({
+          key: timerKey,
+          exerciseName,
+          remaining: REST_TIME_SECONDS,
+        });
+      }
+
+      return updated;
+    });
+  };
+
+  const toggleExerciseExpanded = (exerciseId) => {
+    setExpandedExercises((prev) => {
+      const newSet = new Set(prev);
+      if (newSet.has(exerciseId)) {
+        newSet.delete(exerciseId);
+      } else {
+        newSet.add(exerciseId);
+      }
+      return newSet;
+    });
+  };
+
+  const isExerciseComplete = (exercise) => {
+    return exercise.sets.every((set) => set.completed);
   };
 
   const handleSetFieldChange = (exerciseId, setIndex, field, value) => {
@@ -758,64 +844,88 @@ export default function App() {
               <Text style={styles.timerRowValue}>{formatSeconds(trainingTimer.elapsed)}</Text>
             </View>
             <ScrollView style={styles.sessionScroll}>
-              {sessionExercises.map((exercise) => (
-                <View key={exercise.id} style={styles.sessionExercise}>
-                  <View style={styles.exerciseHeader}>
-                    <Text style={styles.sessionExerciseName}>{exercise.name}</Text>
-                    {EXERCISE_IMAGES[exercise.id] ? (
-                      <TouchableOpacity
-                        style={styles.photoButton}
-                        onPress={() => handleOpenPhoto(exercise)}
-                      >
-                        <Text style={styles.photoButtonText}>Foto</Text>
-                      </TouchableOpacity>
-                    ) : null}
-                  </View>
-                  {exercise.sets.map((set, index) => {
-                    const key = `${exercise.id}-${index}`;
-                    const weightLabel = exercise.weightLabel ?? 'Peso';
-                    const weightPlaceholder = exercise.weightPlaceholder ?? 'kg';
-                    return (
-                      <View key={key} style={styles.setRow}>
-                        <TouchableOpacity
-                          style={[
-                            styles.setIndicator,
-                            set.completed && styles.setIndicatorCompleted,
-                            restTimer && restTimer.key !== key ? styles.setIndicatorDisabled : null,
-                          ]}
-                          onPress={() => handleToggleSet(exercise.id, exercise.name, index)}
-                          disabled={!!restTimer && restTimer.key !== key}
-                        >
-                          <Text style={styles.setIndicatorText}>{index + 1}</Text>
-                        </TouchableOpacity>
-                        <View style={styles.inputGroup}>
-                          <Text style={styles.inputLabel}>Reps</Text>
-                          <TextInput
-                            style={styles.input}
-                            keyboardType="numeric"
-                            value={set.reps}
-                            onChangeText={(text) =>
-                              handleSetFieldChange(exercise.id, index, 'reps', text)
-                            }
-                          />
-                        </View>
-                        <View style={styles.inputGroup}>
-                          <Text style={styles.inputLabel}>{weightLabel}</Text>
-                          <TextInput
-                            style={styles.input}
-                            keyboardType="numeric"
-                            placeholder={weightPlaceholder}
-                            value={set.weight}
-                            onChangeText={(text) =>
-                              handleSetFieldChange(exercise.id, index, 'weight', text)
-                            }
-                          />
-                        </View>
+              {sessionExercises.map((exercise) => {
+                const isExpanded = expandedExercises.has(exercise.id);
+                const isComplete = isExerciseComplete(exercise);
+                return (
+                  <View key={exercise.id} style={styles.sessionExercise}>
+                    <TouchableOpacity
+                      style={styles.exerciseHeader}
+                      onPress={() => toggleExerciseExpanded(exercise.id)}
+                      activeOpacity={0.7}
+                    >
+                      <View style={styles.exerciseHeaderLeft}>
+                        {isComplete && (
+                          <View style={styles.completeCheck}>
+                            <Text style={styles.completeCheckText}>✓</Text>
+                          </View>
+                        )}
+                        <Text style={styles.sessionExerciseName}>{exercise.name}</Text>
                       </View>
-                    );
-                  })}
-                </View>
-              ))}
+                      <View style={styles.exerciseHeaderRight}>
+                        {EXERCISE_IMAGES[exercise.id] ? (
+                          <TouchableOpacity
+                            style={styles.photoButton}
+                            onPress={(e) => {
+                              e.stopPropagation();
+                              handleOpenPhoto(exercise);
+                            }}
+                          >
+                            <Text style={styles.photoButtonText}>Foto</Text>
+                          </TouchableOpacity>
+                        ) : null}
+                        <Text style={styles.expandIcon}>{isExpanded ? '▼' : '▶'}</Text>
+                      </View>
+                    </TouchableOpacity>
+                    {isExpanded &&
+                      exercise.sets.map((set, index) => {
+                        const key = `${exercise.id}-${index}`;
+                        const weightLabel = exercise.weightLabel ?? 'Peso';
+                        const weightPlaceholder = exercise.weightPlaceholder ?? 'kg';
+                        return (
+                          <View key={key} style={styles.setRow}>
+                            <TouchableOpacity
+                              style={[
+                                styles.setIndicator,
+                                set.completed && styles.setIndicatorCompleted,
+                                (restTimer && restTimer.key !== key) || set.completed
+                                  ? styles.setIndicatorDisabled
+                                  : null,
+                              ]}
+                              onPress={() => handleToggleSet(exercise.id, exercise.name, index)}
+                              disabled={(!!restTimer && restTimer.key !== key) || set.completed}
+                            >
+                              <Text style={styles.setIndicatorText}>{index + 1}</Text>
+                            </TouchableOpacity>
+                            <View style={styles.inputGroup}>
+                              <Text style={styles.inputLabel}>Reps</Text>
+                              <TextInput
+                                style={styles.input}
+                                keyboardType="numeric"
+                                value={set.reps}
+                                onChangeText={(text) =>
+                                  handleSetFieldChange(exercise.id, index, 'reps', text)
+                                }
+                              />
+                            </View>
+                            <View style={styles.inputGroup}>
+                              <Text style={styles.inputLabel}>{weightLabel}</Text>
+                              <TextInput
+                                style={styles.input}
+                                keyboardType="numeric"
+                                placeholder={weightPlaceholder}
+                                value={set.weight}
+                                onChangeText={(text) =>
+                                  handleSetFieldChange(exercise.id, index, 'weight', text)
+                                }
+                              />
+                            </View>
+                          </View>
+                        );
+                      })}
+                  </View>
+                );
+              })}
             </ScrollView>
             <TouchableOpacity style={styles.dangerButton} onPress={confirmEndSession}>
               <Text style={styles.dangerButtonText}>Encerrar treino</Text>
@@ -1189,10 +1299,40 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     marginBottom: 12,
   },
+  exerciseHeaderLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+  },
+  exerciseHeaderRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  completeCheck: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: '#22c55e',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 12,
+  },
+  completeCheckText: {
+    color: '#ffffff',
+    fontSize: 16,
+    fontWeight: '700',
+  },
+  expandIcon: {
+    color: '#94a3b8',
+    fontSize: 14,
+    marginLeft: 8,
+  },
   sessionExerciseName: {
     fontSize: 16,
     fontWeight: '700',
     color: '#f8fafc',
+    flex: 1,
   },
   photoButton: {
     backgroundColor: '#38bdf8',
