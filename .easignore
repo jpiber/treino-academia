@@ -1,0 +1,29 @@
+# Ignore temporary Windows folders
+AppData/
+**/AppData/**
+**/WinSAT/**
+*.tmp
+*.log
+
+# Ignore node_modules
+node_modules/
+
+# Ignore build artifacts
+.expo/
+dist/
+build/
+.expo-shared/
+
+# Ignore system files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Ignore any temp folders
+**/Temp/**
+**/tmp/**
+
+# Ignore parent directories that might cause issues
+../AppData/
+../**/AppData/
+
