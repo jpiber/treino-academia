@@ -20,7 +20,8 @@
       },
       "cache": {
         "disabled": false
-      }
+      },
+      "node": "20.11.0"
     },
     "production": {
       "android": {
